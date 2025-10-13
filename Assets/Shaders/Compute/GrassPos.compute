@@ -1,0 +1,96 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+struct Grass
+{
+    float3 position;
+    float4 rotation;
+    float3 scale;
+    float2 localPos;
+};
+
+RWStructuredBuffer<Grass> grassBuf;
+RWStructuredBuffer<float3> groundVertices;
+RWStructuredBuffer<float3> groundNormals;
+Texture2D<float4> grassMap;
+SamplerState samplergrassMap;
+float size;
+float terrainWidth;
+float terrainHeight;
+float positionOffset;
+float scale;
+float scaleOffset;
+float grassStretchFactor;
+float grassMeshHeight;
+float grassHeightCutoff;
+
+float RandomFloat(uint seed)
+{
+    return frac(sin(seed * 12.9898) * 43758.5453);
+}
+
+float RandomRange(uint seed, float minVal, float maxVal)
+{
+    return lerp(minVal, maxVal, RandomFloat(seed));
+}
+
+float4 AngleAxis(float angle, float3 axis) //in this application axis is always normalized, so no need to normalize again
+{
+    axis *= sin(angle);
+    return float4(axis.x, axis.y, axis.z, cos(angle));
+}
+
+float4 FromToRotation(float3 from, float3 to)
+{
+    float3 axis = cross(from, to);
+    float angle = acos(dot(from, to)); //HLSL acos returns radians, no need to convert from degrees
+    return AngleAxis(angle, normalize(axis));
+}
+
+bool ValidGrassPos(float x, float y)
+{
+    float2 uv = float2(x / size, y / size);
+    float4 color = grassMap.SampleLevel(samplergrassMap, uv, 0);
+    float averageCol = (color.x + color.y + color.z) / 3;
+    
+    if(averageCol > grassHeightCutoff)
+    {
+        return false;
+    }
+    return true;
+}
+
+[numthreads(8,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    Grass grass = grassBuf[id.x];
+
+    if(ValidGrassPos(grass.localPos.x, grass.localPos.y))
+    {
+        int grassToWidthRatio = terrainWidth / size;
+        int grassToHeightRatio = terrainHeight / size;
+        int grassToMeshX = grass.localPos.x * grassToWidthRatio;
+        int grassToMeshZ = grass.localPos.y * grassToHeightRatio;
+
+        float grassMeshScaleUpper = scale + scaleOffset;
+        float grassMeshScaleLower = scale - scaleOffset;
+        float finalScale = RandomRange(id.x, grassMeshScaleLower, grassMeshScaleUpper);
+
+        float3 normal = groundNormals[grassToMeshX + grassToMeshZ * terrainWidth];
+        float3 up = float3(0, 1, 0);
+        grass.rotation = FromToRotation(up, normal);
+
+        float3 pos = groundVertices[grassToMeshX + grassToMeshZ * terrainWidth];
+        float xOffset = RandomRange(id.x, -positionOffset, positionOffset);
+        float zOffset = RandomRange(id.x, -positionOffset, positionOffset);
+        float yOffset = grassMeshHeight * (scale / (2 / grassStretchFactor));
+
+        grass.position = float3(pos.x + xOffset, pos.y + yOffset, pos.z + zOffset);
+        grass.scale = float3(finalScale, finalScale * grassStretchFactor, finalScale);
+
+        grassBuf[id.x] = grass;
+    }
+}
